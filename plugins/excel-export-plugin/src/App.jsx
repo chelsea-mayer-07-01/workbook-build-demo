@@ -32,6 +32,17 @@ function App() {
     setStatus(null);
     setIsExporting(true);
     try {
+      // TEMP DEBUG — remove once the empty-column issue is diagnosed.
+      console.log("[excel-export-plugin] columnInfo:", columnInfo);
+      console.log(
+        "[excel-export-plugin] sigmaData keys + first values:",
+        Object.fromEntries(
+          Object.entries(sigmaData || {}).map(([k, v]) => [
+            k,
+            { name: columnInfo?.[k]?.name, length: v?.length, sample: v?.slice(0, 3) },
+          ])
+        )
+      );
       const result = await exportToExcel({
         columnOrder,
         columnInfo,
