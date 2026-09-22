@@ -63,16 +63,15 @@ function App() {
 
   const canExport = Boolean(config.source && config.splitColumn && hasData) && !isExporting;
 
-  // TEMP DEBUG — remove once the empty-column issue is diagnosed.
-  const debugRows = columnOrder.map((colId) => {
-    const values = sigmaData?.[colId] ?? [];
-    return {
-      colId,
-      name: columnInfo?.[colId]?.name ?? "(no name)",
-      length: values.length,
-      sample: JSON.stringify(values.slice(0, 3)),
-    };
-  });
+  // TEMP DEBUG — checking whether the browser exposes the parent workbook
+  // URL to this iframe at all. Remove once confirmed either way.
+  const debugText = [
+    `document.referrer = ${JSON.stringify(document.referrer)}`,
+    `window.location.href = ${JSON.stringify(window.location.href)}`,
+    `location.ancestorOrigins = ${JSON.stringify(
+      Array.from(window.location.ancestorOrigins ?? [])
+    )}`,
+  ].join("\n");
 
   return (
     <div className="excel-export-plugin">
@@ -87,13 +86,7 @@ function App() {
         </p>
       )}
       {status && <p className={`status status-${status.type}`}>{status.message}</p>}
-      {debugRows.length > 0 && (
-        <pre className="debug-panel">
-          {debugRows
-            .map((r) => `${r.colId} | "${r.name}" | len=${r.length} | ${r.sample}`)
-            .join("\n")}
-        </pre>
-      )}
+      <pre className="debug-panel">{debugText}</pre>
     </div>
   );
 }
