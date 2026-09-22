@@ -1,5 +1,5 @@
-import { client, useConfig, useElementColumns } from "@sigmacomputing/plugin";
-import { useCallback, useState } from "react";
+import { client, useConfig, useElementColumns, useElementData } from "@sigmacomputing/plugin";
+import { useCallback, useMemo, useState } from "react";
 import { parseCsv } from "./csv";
 import { exportToExcel } from "./exportToExcel";
 import { getWorkbookPath } from "./workbookContext";
@@ -13,6 +13,7 @@ client.config.configureEditorPanel([
 function App() {
   const config = useConfig();
   const columnInfo = useElementColumns(config.source);
+  const sigmaData = useElementData(config.source); // TEMP DEBUG probe, see debugText below
   const [status, setStatus] = useState(null);
   const [isExporting, setIsExporting] = useState(false);
 
@@ -61,6 +62,22 @@ function App() {
 
   const canExport = Boolean(config.source && config.splitColumn) && !isExporting;
 
+  // TEMP DEBUG — checking whether a Grouped Table's aggregate columns come
+  // through the client-side hooks (unlike a Pivot Table's). Remove once
+  // this is settled either way.
+  const debugText = useMemo(() => {
+    const columnIds = Object.keys(columnInfo || {});
+    if (!columnIds.length) return "(no source selected yet)";
+    return columnIds
+      .map((colId) => {
+        const values = sigmaData?.[colId] ?? [];
+        return `${colId} | "${columnInfo[colId]?.name ?? "(no name)"}" | len=${
+          values.length
+        } | ${JSON.stringify(values.slice(0, 3))}`;
+      })
+      .join("\n");
+  }, [columnInfo, sigmaData]);
+
   return (
     <div className="excel-export-plugin">
       <button className="export-button" onClick={handleExport} disabled={!canExport}>
@@ -74,6 +91,7 @@ function App() {
         </p>
       )}
       {status && <p className={`status status-${status.type}`}>{status.message}</p>}
+      <pre className="debug-panel">{debugText}</pre>
     </div>
   );
 }
