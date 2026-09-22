@@ -148,21 +148,59 @@ async function resolveElementIdByColumns(workbookId, expectedColumnNames) {
 
 async function pollDownload(queryId) {
   const deadline = Date.now() + 60_000;
+  let attempt = 0;
   while (Date.now() < deadline) {
+    attempt += 1;
     const res = await sigmaFetch(`/v2/query/${queryId}/download`);
     const contentType = res.headers.get("content-type") || "";
+
+    // 202 (with or without a body) is a standard "still processing" signal.
+    if (res.status === 202) {
+      console.log(`[excel-export-plugin server] poll #${attempt}: 202, retrying`);
+      await res.text().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
+    }
+
     if (contentType.includes("application/json")) {
       const body = await res.json();
+      console.log(`[excel-export-plugin server] poll #${attempt}: JSON`, body);
       if (body.jobComplete === false) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         continue;
       }
       throw new Error(`Unexpected response while polling export: ${JSON.stringify(body)}`);
     }
+
     if (!res.ok) throw new Error(`Export download failed: ${res.status} ${await res.text()}`);
-    return res.text();
+
+    const text = await res.text();
+    console.log(
+      `[excel-export-plugin server] poll #${attempt}: ${res.status} ${contentType}, body length=${text.length}`
+    );
+    // A genuinely ready CSV always has at least a header row. An empty
+    // 200 OK body has been observed as a transient "not ready yet" state.
+    if (!text) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
+    }
+    return text;
   }
   throw new Error("Export timed out after 60s.");
+}
+
+function csvEscape(value) {
+  const str = value === null || value === undefined ? "" : String(value);
+  return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+
+function rowsToCsv(rows) {
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.map(csvEscape).join(",")];
+  for (const row of rows) {
+    lines.push(headers.map((h) => csvEscape(row[h])).join(","));
+  }
+  return lines.join("\n");
 }
 
 async function exportElementAsCsv(workbookId, elementId) {
@@ -173,6 +211,10 @@ async function exportElementAsCsv(workbookId, elementId) {
   });
   if (!res.ok) throw new Error(`Export request failed: ${res.status} ${await res.text()}`);
   const data = await res.json();
+  console.log("[excel-export-plugin server] export response:", data);
+  if (data.jobComplete && Array.isArray(data.rows) && data.rows.length) {
+    return rowsToCsv(data.rows);
+  }
   if (!data.queryId) throw new Error("Export response was missing a queryId.");
   return pollDownload(data.queryId);
 }
