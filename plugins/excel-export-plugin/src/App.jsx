@@ -37,17 +37,15 @@ function App() {
       }
       const csvText = await response.text();
       const { headers, records } = parseCsv(csvText);
-      if (!records.length) {
-        // TEMP DEBUG — surface the raw CSV so we can see its actual shape
-        // instead of just "No data to export."
-        throw new Error(
-          `No data rows parsed. headers=${JSON.stringify(headers)} rawCsvPreview=${JSON.stringify(
-            csvText.slice(0, 1000)
-          )}`
-        );
-      }
+      // Sigma's export doesn't necessarily return columns in visual left-to-
+      // right order, but columnNames (from useElementColumns) does — reorder
+      // to match, appending anything unexpected at the end rather than
+      // dropping it.
+      const orderedHeaders = columnNames.filter((name) => headers.includes(name));
+      const leftoverHeaders = headers.filter((h) => !orderedHeaders.includes(h));
+      const finalHeaders = [...orderedHeaders, ...leftoverHeaders];
       const result = await exportToExcel({
-        headers,
+        headers: finalHeaders,
         records,
         splitColumnName,
         fileNamePrefix: splitColumnName ? `export-by-${splitColumnName}` : "sigma-export",
