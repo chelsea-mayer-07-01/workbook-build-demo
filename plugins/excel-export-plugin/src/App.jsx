@@ -32,17 +32,6 @@ function App() {
     setStatus(null);
     setIsExporting(true);
     try {
-      // TEMP DEBUG — remove once the empty-column issue is diagnosed.
-      console.log("[excel-export-plugin] columnInfo:", columnInfo);
-      console.log(
-        "[excel-export-plugin] sigmaData keys + first values:",
-        Object.fromEntries(
-          Object.entries(sigmaData || {}).map(([k, v]) => [
-            k,
-            { name: columnInfo?.[k]?.name, length: v?.length, sample: v?.slice(0, 3) },
-          ])
-        )
-      );
       const result = await exportToExcel({
         columnOrder,
         columnInfo,
@@ -74,6 +63,17 @@ function App() {
 
   const canExport = Boolean(config.source && config.splitColumn && hasData) && !isExporting;
 
+  // TEMP DEBUG — remove once the empty-column issue is diagnosed.
+  const debugRows = columnOrder.map((colId) => {
+    const values = sigmaData?.[colId] ?? [];
+    return {
+      colId,
+      name: columnInfo?.[colId]?.name ?? "(no name)",
+      length: values.length,
+      sample: JSON.stringify(values.slice(0, 3)),
+    };
+  });
+
   return (
     <div className="excel-export-plugin">
       <button className="export-button" onClick={handleExport} disabled={!canExport}>
@@ -87,6 +87,13 @@ function App() {
         </p>
       )}
       {status && <p className={`status status-${status.type}`}>{status.message}</p>}
+      {debugRows.length > 0 && (
+        <pre className="debug-panel">
+          {debugRows
+            .map((r) => `${r.colId} | "${r.name}" | len=${r.length} | ${r.sample}`)
+            .join("\n")}
+        </pre>
+      )}
     </div>
   );
 }
