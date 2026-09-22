@@ -75,7 +75,75 @@ async function resolveWorkbookId(urlId) {
     page = data.nextPage;
     if (!page) break;
   }
-  throw new Error(`No workbook found with urlId "${urlId}".`);
+  throw new Error(
+    `No workbook found with urlId "${urlId}". If you just created/renamed this workbook, ` +
+      "make sure it's saved (no pending changes) and reload the Sigma page so the plugin picks up the current URL."
+  );
+}
+
+async function listAllElements(workbookId) {
+  const pagesRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages`);
+  if (!pagesRes.ok) throw new Error(`List pages failed: ${pagesRes.status} ${await pagesRes.text()}`);
+  const pagesData = await pagesRes.json();
+  const pages = pagesData.entries || pagesData;
+
+  const elements = [];
+  for (const page of pages) {
+    const pageId = page.pageId || page.id;
+    const elementsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages/${pageId}/elements`);
+    if (!elementsRes.ok) continue;
+    const elementsData = await elementsRes.json();
+    const pageElements = elementsData.entries || elementsData;
+    for (const e of pageElements) {
+      elements.push({ elementId: e.elementId || e.id, type: e.type, name: e.name, pageId });
+    }
+  }
+  return elements;
+}
+
+async function getElementColumnLabels(workbookId, elementId) {
+  const res = await sigmaFetch(`/v2/workbooks/${workbookId}/elements/${elementId}/columns`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  const entries = data.entries || data;
+  return entries.map((c) => (c.label || c.name || "").toLowerCase()).filter(Boolean);
+}
+
+/**
+ * The Plugin SDK's element picker (config.source) and the REST API's
+ * elementId are different ID spaces — empirically confirmed, no
+ * documented mapping between them. Match dynamically instead: compare the
+ * column names the plugin already knows (from useElementColumns, which
+ * works even when useElementData doesn't) against every real element's
+ * columns, and pick the best overlap. Works for any table/pivot table
+ * without hardcoding an ID.
+ */
+async function resolveElementIdByColumns(workbookId, expectedColumnNames) {
+  const expected = new Set(expectedColumnNames.map((n) => n.toLowerCase()));
+  const candidates = (await listAllElements(workbookId)).filter((e) => e.type !== "plugin");
+
+  const scored = [];
+  for (const candidate of candidates) {
+    const labels = await getElementColumnLabels(workbookId, candidate.elementId);
+    if (!labels.length) continue;
+    const overlap = labels.filter((label) => expected.has(label)).length;
+    const score = overlap / Math.max(expected.size, labels.length);
+    scored.push({ ...candidate, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  if (!best || best.score < 0.5) {
+    const summary = scored
+      .slice(0, 5)
+      .map((c) => `"${c.name}" (${c.type}, score=${c.score.toFixed(2)})`)
+      .join("; ");
+    throw new Error(
+      "Could not confidently match the plugin's source to a workbook element by its columns. " +
+        `Closest candidates: ${summary || "none found"}.`
+    );
+  }
+  return best.elementId;
 }
 
 async function pollDownload(queryId) {
@@ -114,13 +182,16 @@ app.use(express.json());
 
 app.post("/api/export-pivot", async (req, res) => {
   try {
-    const { wbPath, elementId } = req.body || {};
-    if (!elementId) return res.status(400).json({ error: "Missing elementId." });
+    const { wbPath, columnNames } = req.body || {};
+    if (!Array.isArray(columnNames) || !columnNames.length) {
+      return res.status(400).json({ error: "Missing columnNames." });
+    }
     const urlId = extractUrlId(wbPath);
     if (!urlId) {
       return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
     }
     const workbookId = await resolveWorkbookId(urlId);
+    const elementId = await resolveElementIdByColumns(workbookId, columnNames);
     const csv = await exportElementAsCsv(workbookId, elementId);
     res.type("text/csv").send(csv);
   } catch (err) {
@@ -129,9 +200,8 @@ app.post("/api/export-pivot", async (req, res) => {
   }
 });
 
-// TEMP DEBUG — lists every page/element the REST API sees for a workbook,
-// with their real elementIds, so we can compare against the plugin SDK's
-// config.source value. Remove once the elementId mismatch is resolved.
+// Debug helper: lists every page/element the REST API sees for a workbook,
+// with their real elementIds — handy when troubleshooting a match failure.
 app.post("/api/debug-elements", async (req, res) => {
   try {
     const { wbPath } = req.body || {};
@@ -140,30 +210,8 @@ app.post("/api/debug-elements", async (req, res) => {
       return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
     }
     const workbookId = await resolveWorkbookId(urlId);
-
-    const pagesRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages`);
-    if (!pagesRes.ok) throw new Error(`List pages failed: ${pagesRes.status} ${await pagesRes.text()}`);
-    const pagesData = await pagesRes.json();
-    const pages = pagesData.entries || pagesData;
-
-    const result = [];
-    for (const page of pages) {
-      const pageId = page.pageId || page.id;
-      const elementsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages/${pageId}/elements`);
-      if (!elementsRes.ok) {
-        result.push({ pageId, name: page.name, error: `${elementsRes.status} ${await elementsRes.text()}` });
-        continue;
-      }
-      const elementsData = await elementsRes.json();
-      const elements = elementsData.entries || elementsData;
-      result.push({
-        pageId,
-        name: page.name,
-        elements: elements.map((e) => ({ elementId: e.elementId || e.id, type: e.type, name: e.name })),
-      });
-    }
-
-    res.json({ workbookId, pages: result });
+    const elements = await listAllElements(workbookId);
+    res.json({ workbookId, elements });
   } catch (err) {
     console.error("[excel-export-plugin server]", err);
     res.status(500).json({ error: err.message });

@@ -34,6 +34,17 @@ and the backend resolves that `urlId` to a real workbook ID via `/v2/files`
 (`document.referrer` is blocked by Sigma's iframe policy, so this is the
 one reliable source for it — see `src/workbookContext.js`).
 
+It also has to identify *which element* to export without a usable ID: the
+Plugin SDK's element picker (`config.source`) and the REST API's `elementId`
+are different ID spaces with no documented mapping between them (confirmed
+empirically — none of the SDK's IDs matched any real element ID for the
+same workbook). So instead of passing an ID across, the plugin sends the
+column *names* it already knows via `useElementColumns` (which come through
+reliably even when the row data doesn't), and the backend matches those
+against every real element's columns (`GET
+/v2/workbooks/{id}/elements/{elementId}/columns`) to find the best fit —
+see `resolveElementIdByColumns` in `server/index.js`.
+
 ## Run locally
 
 ```sh
@@ -74,8 +85,9 @@ you edit `server/index.js`).
 - `src/exportToExcel.js` — groups records by the chosen column and builds
   the formatted workbook with [ExcelJS](https://github.com/exceljs/exceljs).
 - `server/index.js` — local Express backend: OAuth token exchange, resolves
-  the workbook ID from its `urlId`, calls Sigma's export endpoint, polls
-  for completion, and returns the CSV.
+  the workbook ID from its `urlId`, matches the plugin's source to a real
+  element by column names, calls Sigma's export endpoint, polls for
+  completion, and returns the CSV.
 
 ## Production hosting
 

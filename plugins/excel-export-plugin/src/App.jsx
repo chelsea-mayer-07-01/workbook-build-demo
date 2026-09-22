@@ -1,5 +1,5 @@
 import { client, useConfig, useElementColumns } from "@sigmacomputing/plugin";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { parseCsv } from "./csv";
 import { exportToExcel } from "./exportToExcel";
 import { getWorkbookPath } from "./workbookContext";
@@ -17,6 +17,10 @@ function App() {
   const [isExporting, setIsExporting] = useState(false);
 
   const splitColumnName = config.splitColumn ? columnInfo?.[config.splitColumn]?.name : null;
+  const columnNames = useMemo(
+    () => Object.values(columnInfo || {}).map((c) => c.name).filter(Boolean),
+    [columnInfo]
+  );
 
   const handleExport = useCallback(async () => {
     setStatus(null);
@@ -25,7 +29,7 @@ function App() {
       const response = await fetch("/api/export-pivot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wbPath: getWorkbookPath(), elementId: config.source }),
+        body: JSON.stringify({ wbPath: getWorkbookPath(), columnNames }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
@@ -50,7 +54,7 @@ function App() {
     } finally {
       setIsExporting(false);
     }
-  }, [config.source, splitColumnName]);
+  }, [columnNames, splitColumnName]);
 
   let hint = null;
   if (!config.source) {
