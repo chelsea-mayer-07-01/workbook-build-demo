@@ -37,6 +37,15 @@ function App() {
       }
       const csvText = await response.text();
       const { headers, records } = parseCsv(csvText);
+      if (!records.length) {
+        // TEMP DEBUG — surface the raw CSV so we can see its actual shape
+        // instead of just "No data to export."
+        throw new Error(
+          `No data rows parsed. headers=${JSON.stringify(headers)} rawCsvPreview=${JSON.stringify(
+            csvText.slice(0, 1000)
+          )}`
+        );
+      }
       const result = await exportToExcel({
         headers,
         records,
