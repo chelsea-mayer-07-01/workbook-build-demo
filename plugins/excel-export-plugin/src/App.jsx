@@ -1,6 +1,8 @@
-import { client, useConfig, useElementColumns, useElementData } from "@sigmacomputing/plugin";
-import { useCallback, useMemo, useState } from "react";
+import { client, useConfig, useElementColumns } from "@sigmacomputing/plugin";
+import { useCallback, useState } from "react";
+import { parseCsv } from "./csv";
 import { exportToExcel } from "./exportToExcel";
+import { getWorkbookPath } from "./workbookContext";
 import "./App.css";
 
 client.config.configureEditorPanel([
@@ -11,32 +13,30 @@ client.config.configureEditorPanel([
 function App() {
   const config = useConfig();
   const columnInfo = useElementColumns(config.source);
-  const sigmaData = useElementData(config.source);
   const [status, setStatus] = useState(null);
   const [isExporting, setIsExporting] = useState(false);
 
-  const columnOrder = useMemo(() => Object.keys(columnInfo || {}), [columnInfo]);
-  const hasData = columnOrder.length > 0 && sigmaData && Object.keys(sigmaData).length > 0;
   const splitColumnName = config.splitColumn ? columnInfo?.[config.splitColumn]?.name : null;
-
-  const groupCount = useMemo(() => {
-    if (!config.splitColumn || !hasData) return null;
-    const values = sigmaData[config.splitColumn] || [];
-    const distinct = new Set(
-      values.map((v) => (v === null || v === undefined ? "Blank" : String(v)))
-    );
-    return distinct.size;
-  }, [config.splitColumn, hasData, sigmaData]);
 
   const handleExport = useCallback(async () => {
     setStatus(null);
     setIsExporting(true);
     try {
+      const response = await fetch("/api/export-pivot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wbPath: getWorkbookPath(), elementId: config.source }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `Export request failed (${response.status}).`);
+      }
+      const csvText = await response.text();
+      const { headers, records } = parseCsv(csvText);
       const result = await exportToExcel({
-        columnOrder,
-        columnInfo,
-        sigmaData,
-        splitColumnId: config.splitColumn,
+        headers,
+        records,
+        splitColumnName,
         fileNamePrefix: splitColumnName ? `export-by-${splitColumnName}` : "sigma-export",
       });
       setStatus({
@@ -50,28 +50,16 @@ function App() {
     } finally {
       setIsExporting(false);
     }
-  }, [columnOrder, columnInfo, sigmaData, config.splitColumn, splitColumnName]);
+  }, [config.source, splitColumnName]);
 
   let hint = null;
   if (!config.source) {
-    hint = "Select a data source in the editor panel to get started.";
+    hint = "Select a data source (e.g. a Pivot Table) in the editor panel to get started.";
   } else if (!config.splitColumn) {
     hint = "Select a column to split worksheets by in the editor panel.";
-  } else if (!hasData) {
-    hint = "Waiting for data…";
   }
 
-  const canExport = Boolean(config.source && config.splitColumn && hasData) && !isExporting;
-
-  // TEMP DEBUG — checking whether the browser exposes the parent workbook
-  // URL to this iframe at all. Remove once confirmed either way.
-  const debugText = [
-    `document.referrer = ${JSON.stringify(document.referrer)}`,
-    `window.location.href = ${JSON.stringify(window.location.href)}`,
-    `location.ancestorOrigins = ${JSON.stringify(
-      Array.from(window.location.ancestorOrigins ?? [])
-    )}`,
-  ].join("\n");
+  const canExport = Boolean(config.source && config.splitColumn) && !isExporting;
 
   return (
     <div className="excel-export-plugin">
@@ -79,14 +67,13 @@ function App() {
         {isExporting ? "Exporting…" : "Export to Excel"}
       </button>
       {hint && <p className="hint">{hint}</p>}
-      {!hint && groupCount !== null && (
+      {!hint && (
         <p className="hint">
-          Will create {groupCount} worksheet{groupCount === 1 ? "" : "s"}, split by &ldquo;
-          {splitColumnName}&rdquo;.
+          Will split worksheets by &ldquo;{splitColumnName}&rdquo;, using the exact values Sigma
+          computes for this element.
         </p>
       )}
       {status && <p className={`status status-${status.type}`}>{status.message}</p>}
-      <pre className="debug-panel">{debugText}</pre>
     </div>
   );
 }

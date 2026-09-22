@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Sigma REST API credentials for the local export backend.
+.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -24,77 +24,72 @@ function sanitizeSheetName(rawName, usedNames) {
   return unique;
 }
 
-function isDateValue(value) {
-  return (
-    value instanceof Date ||
-    (typeof value === "string" && /^\d{4}-\d{2}-\d{2}([ T]|$)/.test(value))
-  );
+function isDateString(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}([ T]|$)/.test(value);
+}
+
+function isNumericString(value) {
+  return typeof value === "string" && value !== "" && /^-?\d+(\.\d+)?$/.test(value);
+}
+
+function coerceValue(raw) {
+  if (raw === "" || raw === null || raw === undefined) return null;
+  if (isNumericString(raw)) return Number(raw);
+  if (isDateString(raw)) {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return raw;
 }
 
 function detectNumberFormat(values) {
-  const sample = values.find((v) => v !== null && v !== undefined);
-  if (typeof sample !== "number") return null;
+  const sample = values.find((v) => typeof v === "number");
+  if (sample === undefined) return null;
   return Number.isInteger(sample) ? "#,##0" : "#,##0.00";
 }
 
 /**
- * Groups an element's rows by a chosen column and writes one formatted
- * worksheet per distinct value, triggering a browser download of the result.
+ * Groups CSV records (already the exact values Sigma computed server-side,
+ * aggregates included) by a chosen column and writes one formatted
+ * worksheet per distinct value, triggering a browser download.
  */
-export async function exportToExcel({
-  columnOrder,
-  columnInfo,
-  sigmaData,
-  splitColumnId,
-  fileNamePrefix,
-}) {
-  const rowCount = sigmaData[splitColumnId]?.length ?? 0;
-  if (!rowCount) {
+export async function exportToExcel({ headers, records, splitColumnName, fileNamePrefix }) {
+  if (!records.length) {
     throw new Error("No data to export.");
   }
+  if (!headers.includes(splitColumnName)) {
+    throw new Error(`Column "${splitColumnName}" was not found in the exported data.`);
+  }
 
-  const groupIndices = new Map();
-  const groupLabels = new Map();
-  for (let i = 0; i < rowCount; i++) {
-    const rawValue = sigmaData[splitColumnId][i];
-    const isBlank = rawValue === null || rawValue === undefined;
-    const key = isBlank ? "__blank__" : String(rawValue);
-    if (!groupIndices.has(key)) {
-      groupIndices.set(key, []);
-      groupLabels.set(key, isBlank ? "Blank" : String(rawValue));
+  const coercedRecords = records.map((record) => {
+    const coerced = {};
+    for (const header of headers) coerced[header] = coerceValue(record[header]);
+    return coerced;
+  });
+
+  const groups = new Map();
+  for (const record of coercedRecords) {
+    const raw = record[splitColumnName];
+    const key = raw === null || raw === undefined ? "__blank__" : String(raw);
+    if (!groups.has(key)) {
+      groups.set(key, { label: raw === null || raw === undefined ? "Blank" : String(raw), rows: [] });
     }
-    groupIndices.get(key).push(i);
+    groups.get(key).rows.push(record);
   }
 
   const columnFormats = new Map(
-    columnOrder.map((colId) => [colId, detectNumberFormat(sigmaData[colId] ?? [])])
+    headers.map((header) => [header, detectNumberFormat(coercedRecords.map((r) => r[header]))])
   );
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Sigma Excel Export Plugin";
   workbook.created = new Date();
-
   const usedSheetNames = new Set();
 
-  for (const [key, indices] of groupIndices) {
-    const worksheet = workbook.addWorksheet(
-      sanitizeSheetName(groupLabels.get(key), usedSheetNames)
-    );
-
-    worksheet.columns = columnOrder.map((colId) => ({
-      header: columnInfo[colId]?.name ?? colId,
-      key: colId,
-      width: 22,
-    }));
-
-    for (const rowIndex of indices) {
-      const rowValues = {};
-      for (const colId of columnOrder) {
-        const value = sigmaData[colId]?.[rowIndex];
-        rowValues[colId] = isDateValue(value) ? new Date(value) : value;
-      }
-      worksheet.addRow(rowValues);
-    }
+  for (const { label, rows } of groups.values()) {
+    const worksheet = workbook.addWorksheet(sanitizeSheetName(label, usedSheetNames));
+    worksheet.columns = headers.map((header) => ({ header, key: header, width: 22 }));
+    for (const row of rows) worksheet.addRow(row);
 
     const headerRow = worksheet.getRow(1);
     headerRow.height = 20;
@@ -107,19 +102,19 @@ export async function exportToExcel({
     worksheet.views = [{ state: "frozen", ySplit: 1 }];
     worksheet.autoFilter = {
       from: { row: 1, column: 1 },
-      to: { row: 1, column: columnOrder.length },
+      to: { row: 1, column: headers.length },
     };
 
     for (let displayRow = 2; displayRow <= worksheet.rowCount; displayRow++) {
-      const sourceRowIndex = indices[displayRow - 2];
+      const record = rows[displayRow - 2];
       const row = worksheet.getRow(displayRow);
       row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-        const colId = columnOrder[colNumber - 1];
+        const header = headers[colNumber - 1];
         cell.border = { top: BORDER, left: BORDER, right: BORDER, bottom: BORDER };
-        if (isDateValue(sigmaData[colId]?.[sourceRowIndex])) {
+        if (record[header] instanceof Date) {
           cell.numFmt = "yyyy-mm-dd";
-        } else if (columnFormats.get(colId)) {
-          cell.numFmt = columnFormats.get(colId);
+        } else if (columnFormats.get(header)) {
+          cell.numFmt = columnFormats.get(header);
         }
         if (displayRow % 2 === 0) {
           cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: STRIPE_FILL } };
@@ -141,5 +136,5 @@ export async function exportToExcel({
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
 
-  return { sheetCount: groupIndices.size, rowCount };
+  return { sheetCount: groups.size, rowCount: records.length };
 }
