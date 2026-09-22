@@ -129,6 +129,47 @@ app.post("/api/export-pivot", async (req, res) => {
   }
 });
 
+// TEMP DEBUG — lists every page/element the REST API sees for a workbook,
+// with their real elementIds, so we can compare against the plugin SDK's
+// config.source value. Remove once the elementId mismatch is resolved.
+app.post("/api/debug-elements", async (req, res) => {
+  try {
+    const { wbPath } = req.body || {};
+    const urlId = extractUrlId(wbPath);
+    if (!urlId) {
+      return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
+    }
+    const workbookId = await resolveWorkbookId(urlId);
+
+    const pagesRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages`);
+    if (!pagesRes.ok) throw new Error(`List pages failed: ${pagesRes.status} ${await pagesRes.text()}`);
+    const pagesData = await pagesRes.json();
+    const pages = pagesData.entries || pagesData;
+
+    const result = [];
+    for (const page of pages) {
+      const pageId = page.pageId || page.id;
+      const elementsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages/${pageId}/elements`);
+      if (!elementsRes.ok) {
+        result.push({ pageId, name: page.name, error: `${elementsRes.status} ${await elementsRes.text()}` });
+        continue;
+      }
+      const elementsData = await elementsRes.json();
+      const elements = elementsData.entries || elementsData;
+      result.push({
+        pageId,
+        name: page.name,
+        elements: elements.map((e) => ({ elementId: e.elementId || e.id, type: e.type, name: e.name })),
+      });
+    }
+
+    res.json({ workbookId, pages: result });
+  } catch (err) {
+    console.error("[excel-export-plugin server]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`[excel-export-plugin] backend listening on http://localhost:${PORT}`);
 });
