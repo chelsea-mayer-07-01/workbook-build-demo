@@ -52,7 +52,8 @@ async function sigmaFetch(path, options = {}) {
  */
 function extractUrlId(wbPath) {
   if (!wbPath) return null;
-  const segments = wbPath.split("/").filter(Boolean);
+  const cleanPath = wbPath.split("?")[0].split("#")[0];
+  const segments = cleanPath.split("/").filter(Boolean);
   const bIndex = segments.indexOf("b");
   if (bIndex >= 0 && segments[bIndex + 1]) return segments[bIndex + 1];
   const workbookIndex = segments.indexOf("workbook");
