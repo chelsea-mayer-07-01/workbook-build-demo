@@ -81,60 +81,98 @@ async function resolveWorkbookId(urlId) {
   );
 }
 
-async function listAllElements(workbookId) {
-  const pagesRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages`);
-  if (!pagesRes.ok) throw new Error(`List pages failed: ${pagesRes.status} ${await pagesRes.text()}`);
-  const pagesData = await pagesRes.json();
-  const pages = pagesData.entries || pagesData;
-
-  const elements = [];
-  for (const page of pages) {
-    const pageId = page.pageId || page.id;
-    const elementsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages/${pageId}/elements`);
-    if (!elementsRes.ok) continue;
-    const elementsData = await elementsRes.json();
-    const pageElements = elementsData.entries || elementsData;
-    for (const e of pageElements) {
-      elements.push({ elementId: e.elementId || e.id, type: e.type, name: e.name, pageId });
-    }
-  }
-  return elements;
-}
-
-async function getElementColumns(workbookId, elementId) {
-  const res = await sigmaFetch(`/v2/workbooks/${workbookId}/elements/${elementId}/columns`);
-  if (!res.ok) return [];
-  const data = await res.json();
-  const entries = data.entries || data;
-  return entries.map((c) => c.label || c.name || "").filter(Boolean);
+async function fetchWorkbookSpec(workbookId) {
+  const res = await sigmaFetch(`/v2/workbooks/${workbookId}/spec`);
+  if (!res.ok) throw new Error(`Failed to get workbook spec: ${res.status} ${await res.text()}`);
+  return res.json();
 }
 
 /**
- * The Plugin SDK's element picker (config.source) and the REST API's
- * elementId are different ID spaces — empirically confirmed, no
- * documented mapping between them. Match dynamically instead: compare the
- * column names the plugin already knows (from useElementColumns, which
- * works even when useElementData doesn't) against every real element's
- * columns, and pick the best overlap. Works for any table/pivot table
- * without hardcoding an ID.
- *
- * Also returns that element's own column order from the REST API, since
- * it's the authoritative configured order — useElementColumns' key order
- * on the client side does NOT reliably match Sigma's visual column order
- * (confirmed empirically: reordering by it still came out wrong).
+ * A spec column often has no "name" (only "formula": "[Table/Column]").
+ * Derive a display name from that when a real name isn't present.
  */
-async function resolveElementIdByColumns(workbookId, expectedColumnNames) {
+function deriveColumnName(column) {
+  if (column.name) return column.name;
+  const match = /\/([^/\]]+)\]$/.exec(column.formula || "");
+  if (match) return match[1];
+  return column.formula || column.id;
+}
+
+/** Recursively find every element with a `columns` array anywhere in the spec. */
+function collectElements(spec) {
+  const found = [];
+  function walk(node) {
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+    } else if (node && typeof node === "object") {
+      if (node.id && Array.isArray(node.columns)) found.push(node);
+      for (const value of Object.values(node)) walk(value);
+    }
+  }
+  walk(spec);
+  return found;
+}
+
+/**
+ * The element's `columns` array is NOT the visual order — confirmed
+ * empirically (and documented in this repo's own sigma-workbook-conventions
+ * skill, reference/specification/tables.md → "Round-trip quirks"): Sigma
+ * reorders it (values first, then dimensions) regardless of authored order,
+ * and for a pivot it also includes every referenced field, not just the
+ * ones actually shown. The real order lives in kind-specific fields:
+ *   - pivot-table: rowsBy -> columnsBy -> values (each its own order)
+ *   - table with `groupings` (a "Grouped Table"): each level's
+ *     groupBy -> calculations, levels in order
+ *   - plain table: the `order` field (falls back to columns[] otherwise)
+ */
+function activeColumnIds(element) {
+  if (Array.isArray(element.groupings) && element.groupings.length) {
+    const ids = [];
+    for (const level of element.groupings) {
+      if (Array.isArray(level.groupBy)) ids.push(...level.groupBy);
+      if (Array.isArray(level.calculations)) ids.push(...level.calculations);
+    }
+    return ids;
+  }
+  if (
+    (Array.isArray(element.rowsBy) && element.rowsBy.length) ||
+    (Array.isArray(element.columnsBy) && element.columnsBy.length) ||
+    (Array.isArray(element.values) && element.values.length)
+  ) {
+    const ids = [];
+    for (const r of element.rowsBy || []) ids.push(r.columnId ?? r.id);
+    for (const c of element.columnsBy || []) ids.push(c.columnId ?? c.id);
+    for (const v of element.values || []) ids.push(typeof v === "string" ? v : (v.columnId ?? v.id));
+    return ids;
+  }
+  if (Array.isArray(element.order) && element.order.length) return element.order;
+  return (element.columns || []).map((c) => c.id);
+}
+
+/**
+ * The Plugin SDK's element picker (config.source) and the REST API/spec's
+ * elementId are different ID spaces — empirically confirmed, no documented
+ * mapping between them. Match dynamically instead: compare the column
+ * names the plugin already knows (from useElementColumns, which works even
+ * when useElementData doesn't) against each spec element's *actually
+ * displayed* columns (see activeColumnIds), and pick the best overlap.
+ * Works for any table/pivot table/grouped table without hardcoding an ID.
+ */
+function resolveElementFromSpec(spec, expectedColumnNames) {
   const expectedLower = new Set(expectedColumnNames.map((n) => n.toLowerCase()));
-  const candidates = (await listAllElements(workbookId)).filter((e) => e.type !== "plugin");
+  const elements = collectElements(spec);
 
   const scored = [];
-  for (const candidate of candidates) {
-    const columns = await getElementColumns(workbookId, candidate.elementId);
-    if (!columns.length) continue;
-    const lower = columns.map((c) => c.toLowerCase());
-    const overlap = lower.filter((label) => expectedLower.has(label)).length;
-    const score = overlap / Math.max(expectedLower.size, columns.length);
-    scored.push({ ...candidate, score, columns });
+  for (const element of elements) {
+    const nameById = new Map(element.columns.map((c) => [c.id, deriveColumnName(c)]));
+    const names = activeColumnIds(element)
+      .map((id) => nameById.get(id))
+      .filter(Boolean);
+    if (!names.length) continue;
+    const lower = names.map((n) => n.toLowerCase());
+    const overlap = lower.filter((n) => expectedLower.has(n)).length;
+    const score = overlap / Math.max(expectedLower.size, names.length);
+    scored.push({ elementId: element.id, kind: element.kind, score, columnOrder: names });
   }
   scored.sort((a, b) => b.score - a.score);
 
@@ -142,14 +180,14 @@ async function resolveElementIdByColumns(workbookId, expectedColumnNames) {
   if (!best || best.score < 0.5) {
     const summary = scored
       .slice(0, 5)
-      .map((c) => `"${c.name}" (${c.type}, score=${c.score.toFixed(2)})`)
+      .map((c) => `${c.elementId} (${c.kind}, score=${c.score.toFixed(2)})`)
       .join("; ");
     throw new Error(
       "Could not confidently match the plugin's source to a workbook element by its columns. " +
         `Closest candidates: ${summary || "none found"}.`
     );
   }
-  return { elementId: best.elementId, columnOrder: best.columns };
+  return { elementId: best.elementId, columnOrder: best.columnOrder };
 }
 
 async function pollDownload(queryId) {
@@ -239,7 +277,8 @@ app.post("/api/export-pivot", async (req, res) => {
       return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
     }
     const workbookId = await resolveWorkbookId(urlId);
-    const { elementId, columnOrder } = await resolveElementIdByColumns(workbookId, columnNames);
+    const spec = await fetchWorkbookSpec(workbookId);
+    const { elementId, columnOrder } = resolveElementFromSpec(spec, columnNames);
     const csv = await exportElementAsCsv(workbookId, elementId);
     res.set("X-Column-Order", encodeURIComponent(JSON.stringify(columnOrder)));
     res.set("Access-Control-Expose-Headers", "X-Column-Order");
@@ -250,57 +289,31 @@ app.post("/api/export-pivot", async (req, res) => {
   }
 });
 
-// Debug helper: lists every page/element the REST API sees for a workbook,
-// with their real elementIds — handy when troubleshooting a match failure.
-app.post("/api/debug-elements", async (req, res) => {
+// Debug helper: shows every candidate element found in the workbook spec,
+// its computed display-column order, and its match score against the
+// columnNames the plugin sent — handy when a match fails or looks wrong.
+app.post("/api/debug-match", async (req, res) => {
   try {
-    const { wbPath } = req.body || {};
+    const { wbPath, columnNames } = req.body || {};
     const urlId = extractUrlId(wbPath);
     if (!urlId) {
       return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
     }
     const workbookId = await resolveWorkbookId(urlId);
-    const elements = await listAllElements(workbookId);
-    res.json({ workbookId, elements });
-  } catch (err) {
-    console.error("[excel-export-plugin server]", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// TEMP DEBUG — dumps every field Sigma returns for one element and its
-// columns, unfiltered, so we can look for a pivot rows/columns/values
-// structure the trimmed listAllElements()/getElementColumns() are hiding.
-app.post("/api/debug-raw-element", async (req, res) => {
-  try {
-    const { wbPath, elementId } = req.body || {};
-    const urlId = extractUrlId(wbPath);
-    if (!urlId) {
-      return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
-    }
-    const workbookId = await resolveWorkbookId(urlId);
-
-    const pagesRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages`);
-    const pagesData = await pagesRes.json();
-    const pages = pagesData.entries || pagesData;
-
-    let rawElement = null;
-    for (const page of pages) {
-      const pageId = page.pageId || page.id;
-      const elementsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages/${pageId}/elements`);
-      const elementsData = await elementsRes.json();
-      const pageElements = elementsData.entries || elementsData;
-      const match = pageElements.find((e) => (e.elementId || e.id) === elementId);
-      if (match) {
-        rawElement = match;
-        break;
-      }
-    }
-
-    const columnsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/elements/${elementId}/columns`);
-    const rawColumns = await columnsRes.json();
-
-    res.json({ rawElement, rawColumns });
+    const spec = await fetchWorkbookSpec(workbookId);
+    const expectedLower = new Set((columnNames || []).map((n) => n.toLowerCase()));
+    const candidates = collectElements(spec).map((element) => {
+      const nameById = new Map(element.columns.map((c) => [c.id, deriveColumnName(c)]));
+      const columnOrder = activeColumnIds(element)
+        .map((id) => nameById.get(id))
+        .filter(Boolean);
+      const lower = columnOrder.map((n) => n.toLowerCase());
+      const overlap = lower.filter((n) => expectedLower.has(n)).length;
+      const score = columnOrder.length ? overlap / Math.max(expectedLower.size, columnOrder.length) : 0;
+      return { elementId: element.id, kind: element.kind, columnOrder, score };
+    });
+    candidates.sort((a, b) => b.score - a.score);
+    res.json({ workbookId, expected: columnNames, candidates });
   } catch (err) {
     console.error("[excel-export-plugin server]", err);
     res.status(500).json({ error: err.message });
