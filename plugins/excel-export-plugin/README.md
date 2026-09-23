@@ -41,9 +41,20 @@ empirically — none of the SDK's IDs matched any real element ID for the
 same workbook). So instead of passing an ID across, the plugin sends the
 column *names* it already knows via `useElementColumns` (which come through
 reliably even when the row data doesn't), and the backend matches those
-against every real element's columns (`GET
-/v2/workbooks/{id}/elements/{elementId}/columns`) to find the best fit —
-see `resolveElementIdByColumns` in `server/index.js`.
+against every element found in the full **workbook spec**
+(`GET /v2/workbooks/{id}/spec`) to find the best fit.
+
+That same spec lookup also solves column *order*. Neither
+`useElementColumns`' key order nor a flat "list columns" REST endpoint
+reflects what's actually shown on screen — both effectively just dump the
+full underlying data-model schema, alphabetically by internal column ID.
+The real order lives in kind-specific spec fields (documented in this
+repo's own `sigma-workbook-conventions` skill,
+`reference/specification/tables.md`): a Pivot Table's `rowsBy` →
+`columnsBy` → `values` (each independently ordered), a Grouped Table's
+`groupings[].groupBy` → `calculations` per level, or a plain table's
+`order` field. See `resolveElementFromSpec`/`activeColumnIds` in
+`server/index.js`.
 
 ## Run locally
 
@@ -86,8 +97,8 @@ you edit `server/index.js`).
   the formatted workbook with [ExcelJS](https://github.com/exceljs/exceljs).
 - `server/index.js` — local Express backend: OAuth token exchange, resolves
   the workbook ID from its `urlId`, matches the plugin's source to a real
-  element by column names, calls Sigma's export endpoint, polls for
-  completion, and returns the CSV.
+  element and its true display-column order via the workbook spec, calls
+  Sigma's export endpoint, polls for completion, and returns the CSV.
 
 ## Production hosting
 
