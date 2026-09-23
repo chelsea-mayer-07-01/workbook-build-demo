@@ -268,6 +268,45 @@ app.post("/api/debug-elements", async (req, res) => {
   }
 });
 
+// TEMP DEBUG — dumps every field Sigma returns for one element and its
+// columns, unfiltered, so we can look for a pivot rows/columns/values
+// structure the trimmed listAllElements()/getElementColumns() are hiding.
+app.post("/api/debug-raw-element", async (req, res) => {
+  try {
+    const { wbPath, elementId } = req.body || {};
+    const urlId = extractUrlId(wbPath);
+    if (!urlId) {
+      return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
+    }
+    const workbookId = await resolveWorkbookId(urlId);
+
+    const pagesRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages`);
+    const pagesData = await pagesRes.json();
+    const pages = pagesData.entries || pagesData;
+
+    let rawElement = null;
+    for (const page of pages) {
+      const pageId = page.pageId || page.id;
+      const elementsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages/${pageId}/elements`);
+      const elementsData = await elementsRes.json();
+      const pageElements = elementsData.entries || elementsData;
+      const match = pageElements.find((e) => (e.elementId || e.id) === elementId);
+      if (match) {
+        rawElement = match;
+        break;
+      }
+    }
+
+    const columnsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/elements/${elementId}/columns`);
+    const rawColumns = await columnsRes.json();
+
+    res.json({ rawElement, rawColumns });
+  } catch (err) {
+    console.error("[excel-export-plugin server]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`[excel-export-plugin] backend listening on http://localhost:${PORT}`);
 });
