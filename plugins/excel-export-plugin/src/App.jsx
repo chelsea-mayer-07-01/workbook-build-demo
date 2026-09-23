@@ -1,6 +1,6 @@
 import { client, useConfig, useElementColumns } from "@sigmacomputing/plugin";
 import { useCallback, useMemo, useState } from "react";
-import { parseCsv } from "./csv";
+import { forwardFillColumns, parseCsv } from "./csv";
 import { exportToExcel } from "./exportToExcel";
 import { getWorkbookPath } from "./workbookContext";
 import "./App.css";
@@ -37,16 +37,24 @@ function App() {
       }
       const csvText = await response.text();
       const { headers, records } = parseCsv(csvText);
+
       // Sigma's export doesn't return columns in visual left-to-right order.
-      // The backend sends the element's authoritative REST API column order
-      // via this header (useElementColumns' key order isn't reliable for
-      // this — confirmed empirically). Reorder to match, appending anything
-      // unexpected at the end rather than dropping it.
+      // The backend sends the element's authoritative spec-derived column
+      // order via this header (useElementColumns' key order isn't reliable
+      // for this — confirmed empirically). Reorder to match, appending
+      // anything unexpected at the end rather than dropping it.
       const columnOrderHeader = response.headers.get("X-Column-Order");
       const columnOrder = columnOrderHeader ? JSON.parse(decodeURIComponent(columnOrderHeader)) : [];
       const orderedHeaders = columnOrder.filter((name) => headers.includes(name));
       const leftoverHeaders = headers.filter((h) => !orderedHeaders.includes(h));
       const finalHeaders = [...orderedHeaders, ...leftoverHeaders];
+
+      // Row-dimension columns (e.g. a pivot's Store Region) are only filled
+      // in on the first row of each group in Sigma's export — carry them
+      // down before splitting, or every row but the first lands in "Blank".
+      const fillColumnsHeader = response.headers.get("X-Fill-Columns");
+      const fillColumns = fillColumnsHeader ? JSON.parse(decodeURIComponent(fillColumnsHeader)) : [];
+      forwardFillColumns(records, fillColumns);
       const result = await exportToExcel({
         headers: finalHeaders,
         records,

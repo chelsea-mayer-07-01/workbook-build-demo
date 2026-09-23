@@ -53,3 +53,24 @@ export function parseCsv(text) {
   );
   return { headers, records };
 }
+
+/**
+ * Sigma's export only fills a pivot/grouped-table's row-dimension columns
+ * on the first row of each group, leaving subsequent rows blank (mirroring
+ * the merged-cell look in the UI). Mutating records in place: carry the
+ * last non-blank value in each named column down through following blanks,
+ * so grouping/splitting by that column works on every row, not just the
+ * first of each group.
+ */
+export function forwardFillColumns(records, columnNames) {
+  const lastValue = {};
+  for (const record of records) {
+    for (const name of columnNames) {
+      if (record[name] === "" || record[name] === null || record[name] === undefined) {
+        if (name in lastValue) record[name] = lastValue[name];
+      } else {
+        lastValue[name] = record[name];
+      }
+    }
+  }
+}

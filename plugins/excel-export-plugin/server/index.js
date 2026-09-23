@@ -150,6 +150,29 @@ function activeColumnIds(element) {
 }
 
 /**
+ * The row/column-axis dimension ids only (rowsBy + columnsBy, or each
+ * grouping level's groupBy) — i.e. the subset of activeColumnIds() that
+ * are "group" fields rather than aggregated values. Sigma's export only
+ * fills these in on the first row of each group and leaves subsequent
+ * rows blank (mirroring the merged-cell look in the UI), so callers need
+ * to know which columns require forward-filling before any row-level
+ * grouping/splitting of the exported data.
+ */
+function groupColumnIds(element) {
+  if (Array.isArray(element.groupings) && element.groupings.length) {
+    const ids = [];
+    for (const level of element.groupings) {
+      if (Array.isArray(level.groupBy)) ids.push(...level.groupBy);
+    }
+    return ids;
+  }
+  const ids = [];
+  for (const r of element.rowsBy || []) ids.push(r.columnId ?? r.id);
+  for (const c of element.columnsBy || []) ids.push(c.columnId ?? c.id);
+  return ids;
+}
+
+/**
  * The Plugin SDK's element picker (config.source) and the REST API/spec's
  * elementId are different ID spaces — empirically confirmed, no documented
  * mapping between them. Match dynamically instead: compare the column
@@ -172,7 +195,10 @@ function resolveElementFromSpec(spec, expectedColumnNames) {
     const lower = names.map((n) => n.toLowerCase());
     const overlap = lower.filter((n) => expectedLower.has(n)).length;
     const score = overlap / Math.max(expectedLower.size, names.length);
-    scored.push({ elementId: element.id, kind: element.kind, score, columnOrder: names });
+    const fillColumns = groupColumnIds(element)
+      .map((id) => nameById.get(id))
+      .filter(Boolean);
+    scored.push({ elementId: element.id, kind: element.kind, score, columnOrder: names, fillColumns });
   }
   scored.sort((a, b) => b.score - a.score);
 
@@ -187,7 +213,7 @@ function resolveElementFromSpec(spec, expectedColumnNames) {
         `Closest candidates: ${summary || "none found"}.`
     );
   }
-  return { elementId: best.elementId, columnOrder: best.columnOrder };
+  return { elementId: best.elementId, columnOrder: best.columnOrder, fillColumns: best.fillColumns };
 }
 
 async function pollDownload(queryId) {
@@ -278,10 +304,11 @@ app.post("/api/export-pivot", async (req, res) => {
     }
     const workbookId = await resolveWorkbookId(urlId);
     const spec = await fetchWorkbookSpec(workbookId);
-    const { elementId, columnOrder } = resolveElementFromSpec(spec, columnNames);
+    const { elementId, columnOrder, fillColumns } = resolveElementFromSpec(spec, columnNames);
     const csv = await exportElementAsCsv(workbookId, elementId);
     res.set("X-Column-Order", encodeURIComponent(JSON.stringify(columnOrder)));
-    res.set("Access-Control-Expose-Headers", "X-Column-Order");
+    res.set("X-Fill-Columns", encodeURIComponent(JSON.stringify(fillColumns)));
+    res.set("Access-Control-Expose-Headers", "X-Column-Order, X-Fill-Columns");
     res.type("text/csv").send(csv);
   } catch (err) {
     console.error("[excel-export-plugin server]", err);
