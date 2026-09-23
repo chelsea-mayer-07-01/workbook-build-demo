@@ -9,6 +9,30 @@
   height: 100%;
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  max-width: 280px;
+  font-size: 12px;
+  color: #5b6470;
+}
+
+.field select {
+  padding: 6px 8px;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #12293f;
+  background: #fff;
+}
+
+.field select:disabled {
+  background: #f7f9fc;
+  color: #9aa5b1;
+}
+
 .export-button {
   padding: 8px 16px;
   border: none;

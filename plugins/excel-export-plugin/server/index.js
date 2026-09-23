@@ -172,49 +172,44 @@ function groupColumnIds(element) {
   return ids;
 }
 
-/**
- * The Plugin SDK's element picker (config.source) and the REST API/spec's
- * elementId are different ID spaces — empirically confirmed, no documented
- * mapping between them. Match dynamically instead: compare the column
- * names the plugin already knows (from useElementColumns, which works even
- * when useElementData doesn't) against each spec element's *actually
- * displayed* columns (see activeColumnIds), and pick the best overlap.
- * Works for any table/pivot table/grouped table without hardcoding an ID.
- */
-function resolveElementFromSpec(spec, expectedColumnNames) {
-  const expectedLower = new Set(expectedColumnNames.map((n) => n.toLowerCase()));
-  const elements = collectElements(spec);
-
-  const scored = [];
-  for (const element of elements) {
-    const nameById = new Map(element.columns.map((c) => [c.id, deriveColumnName(c)]));
-    const names = activeColumnIds(element)
-      .map((id) => nameById.get(id))
-      .filter(Boolean);
-    if (!names.length) continue;
-    const lower = names.map((n) => n.toLowerCase());
-    const overlap = lower.filter((n) => expectedLower.has(n)).length;
-    const score = overlap / Math.max(expectedLower.size, names.length);
-    const fillColumns = groupColumnIds(element)
-      .map((id) => nameById.get(id))
-      .filter(Boolean);
-    scored.push({ elementId: element.id, kind: element.kind, score, columnOrder: names, fillColumns });
-  }
-  scored.sort((a, b) => b.score - a.score);
-
-  const best = scored[0];
-  if (!best || best.score < 0.5) {
-    const summary = scored
-      .slice(0, 5)
-      .map((c) => `${c.elementId} (${c.kind}, score=${c.score.toFixed(2)})`)
-      .join("; ");
-    throw new Error(
-      "Could not confidently match the plugin's source to a workbook element by its columns. " +
-        `Closest candidates: ${summary || "none found"}.`
-    );
-  }
-  return { elementId: best.elementId, columnOrder: best.columnOrder, fillColumns: best.fillColumns };
+/** The element's display-column names and its row/column-axis (fill) names. */
+function describeElement(element) {
+  const nameById = new Map(element.columns.map((c) => [c.id, deriveColumnName(c)]));
+  const columnOrder = activeColumnIds(element)
+    .map((id) => nameById.get(id))
+    .filter(Boolean);
+  const fillColumns = groupColumnIds(element)
+    .map((id) => nameById.get(id))
+    .filter(Boolean);
+  return { columnOrder, fillColumns };
 }
+
+/**
+ * The REST API's own "list elements" endpoint reliably has a human name
+ * per element; the spec doesn't always (elements at their default name
+ * often omit the `name` field entirely). Only fetched for the table
+ * picker's labels, not on the export path.
+ */
+async function getElementNames(workbookId) {
+  const pagesRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages`);
+  if (!pagesRes.ok) throw new Error(`List pages failed: ${pagesRes.status} ${await pagesRes.text()}`);
+  const pagesData = await pagesRes.json();
+  const pages = pagesData.entries || pagesData;
+
+  const nameById = new Map();
+  for (const page of pages) {
+    const pageId = page.pageId || page.id;
+    const elementsRes = await sigmaFetch(`/v2/workbooks/${workbookId}/pages/${pageId}/elements`);
+    if (!elementsRes.ok) continue;
+    const elementsData = await elementsRes.json();
+    for (const e of elementsData.entries || elementsData) {
+      nameById.set(e.elementId || e.id, e.name);
+    }
+  }
+  return nameById;
+}
+
+const TABLE_LIKE_KINDS = new Set(["table", "pivot-table", "input-table"]);
 
 async function pollDownload(queryId) {
   const deadline = Date.now() + 60_000;
@@ -292,55 +287,60 @@ async function exportElementAsCsv(workbookId, elementId) {
 const app = express();
 app.use(express.json());
 
-app.post("/api/export-pivot", async (req, res) => {
+// Lists every table/pivot-table/input-table element in the current
+// workbook, with a human name and its actual display-column order, so the
+// plugin can render its own "pick a table" / "pick a column" dropdowns —
+// no edit access or Sigma editor-panel config required.
+app.post("/api/list-tables", async (req, res) => {
   try {
-    const { wbPath, columnNames } = req.body || {};
-    if (!Array.isArray(columnNames) || !columnNames.length) {
-      return res.status(400).json({ error: "Missing columnNames." });
-    }
+    const { wbPath } = req.body || {};
     const urlId = extractUrlId(wbPath);
     if (!urlId) {
       return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
     }
     const workbookId = await resolveWorkbookId(urlId);
-    const spec = await fetchWorkbookSpec(workbookId);
-    const { elementId, columnOrder, fillColumns } = resolveElementFromSpec(spec, columnNames);
-    const csv = await exportElementAsCsv(workbookId, elementId);
-    res.set("X-Column-Order", encodeURIComponent(JSON.stringify(columnOrder)));
-    res.set("X-Fill-Columns", encodeURIComponent(JSON.stringify(fillColumns)));
-    res.set("Access-Control-Expose-Headers", "X-Column-Order, X-Fill-Columns");
-    res.type("text/csv").send(csv);
+    const [spec, nameById] = await Promise.all([fetchWorkbookSpec(workbookId), getElementNames(workbookId)]);
+
+    const tables = collectElements(spec)
+      .filter((el) => TABLE_LIKE_KINDS.has(el.kind))
+      .map((element) => ({
+        elementId: element.id,
+        kind: element.kind,
+        name: nameById.get(element.id) || `${element.kind} (${element.id})`,
+        ...describeElement(element),
+      }))
+      .filter((t) => t.columnOrder.length > 0);
+
+    res.json({ workbookId, tables });
   } catch (err) {
     console.error("[excel-export-plugin server]", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Debug helper: shows every candidate element found in the workbook spec,
-// its computed display-column order, and its match score against the
-// columnNames the plugin sent — handy when a match fails or looks wrong.
-app.post("/api/debug-match", async (req, res) => {
+app.post("/api/export-pivot", async (req, res) => {
   try {
-    const { wbPath, columnNames } = req.body || {};
+    const { wbPath, elementId } = req.body || {};
+    if (!elementId) return res.status(400).json({ error: "Missing elementId." });
     const urlId = extractUrlId(wbPath);
     if (!urlId) {
       return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
     }
     const workbookId = await resolveWorkbookId(urlId);
     const spec = await fetchWorkbookSpec(workbookId);
-    const expectedLower = new Set((columnNames || []).map((n) => n.toLowerCase()));
-    const candidates = collectElements(spec).map((element) => {
-      const nameById = new Map(element.columns.map((c) => [c.id, deriveColumnName(c)]));
-      const columnOrder = activeColumnIds(element)
-        .map((id) => nameById.get(id))
-        .filter(Boolean);
-      const lower = columnOrder.map((n) => n.toLowerCase());
-      const overlap = lower.filter((n) => expectedLower.has(n)).length;
-      const score = columnOrder.length ? overlap / Math.max(expectedLower.size, columnOrder.length) : 0;
-      return { elementId: element.id, kind: element.kind, columnOrder, score };
-    });
-    candidates.sort((a, b) => b.score - a.score);
-    res.json({ workbookId, expected: columnNames, candidates });
+    const element = collectElements(spec).find((el) => el.id === elementId);
+    if (!element) {
+      throw new Error(
+        `Element "${elementId}" was not found in the current workbook spec. If you just changed it, ` +
+          "make sure the workbook is saved (not just a Custom View) and reload the plugin."
+      );
+    }
+    const { columnOrder, fillColumns } = describeElement(element);
+    const csv = await exportElementAsCsv(workbookId, elementId);
+    res.set("X-Column-Order", encodeURIComponent(JSON.stringify(columnOrder)));
+    res.set("X-Fill-Columns", encodeURIComponent(JSON.stringify(fillColumns)));
+    res.set("Access-Control-Expose-Headers", "X-Column-Order, X-Fill-Columns");
+    res.type("text/csv").send(csv);
   } catch (err) {
     console.error("[excel-export-plugin server]", err);
     res.status(500).json({ error: err.message });

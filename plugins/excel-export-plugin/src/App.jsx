@@ -1,26 +1,57 @@
-import { client, useConfig, useElementColumns } from "@sigmacomputing/plugin";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { forwardFillColumns, parseCsv } from "./csv";
 import { exportToExcel } from "./exportToExcel";
 import { getWorkbookPath } from "./workbookContext";
 import "./App.css";
 
-client.config.configureEditorPanel([
-  { name: "source", type: "element" },
-  { name: "splitColumn", type: "column", source: "source", allowMultiple: false },
-]);
-
 function App() {
-  const config = useConfig();
-  const columnInfo = useElementColumns(config.source);
+  const [tables, setTables] = useState([]);
+  const [loadError, setLoadError] = useState(null);
+  const [isLoadingTables, setIsLoadingTables] = useState(true);
+  const [selectedElementId, setSelectedElementId] = useState("");
+  const [splitColumnName, setSplitColumnName] = useState("");
   const [status, setStatus] = useState(null);
   const [isExporting, setIsExporting] = useState(false);
 
-  const splitColumnName = config.splitColumn ? columnInfo?.[config.splitColumn]?.name : null;
-  const columnNames = useMemo(
-    () => Object.values(columnInfo || {}).map((c) => c.name).filter(Boolean),
-    [columnInfo]
+  useEffect(() => {
+    let cancelled = false;
+    async function loadTables() {
+      setIsLoadingTables(true);
+      setLoadError(null);
+      try {
+        const response = await fetch("/api/list-tables", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wbPath: getWorkbookPath() }),
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.error || `Failed to load tables (${response.status}).`);
+        }
+        const data = await response.json();
+        if (!cancelled) setTables(data.tables || []);
+      } catch (err) {
+        if (!cancelled) setLoadError(err.message || "Failed to load tables.");
+      } finally {
+        if (!cancelled) setIsLoadingTables(false);
+      }
+    }
+    loadTables();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const selectedTable = useMemo(
+    () => tables.find((t) => t.elementId === selectedElementId) || null,
+    [tables, selectedElementId]
   );
+
+  const handleTableChange = (event) => {
+    setSelectedElementId(event.target.value);
+    setSplitColumnName("");
+    setStatus(null);
+  };
 
   const handleExport = useCallback(async () => {
     setStatus(null);
@@ -29,7 +60,7 @@ function App() {
       const response = await fetch("/api/export-pivot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wbPath: getWorkbookPath(), columnNames }),
+        body: JSON.stringify({ wbPath: getWorkbookPath(), elementId: selectedElementId }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
@@ -40,9 +71,8 @@ function App() {
 
       // Sigma's export doesn't return columns in visual left-to-right order.
       // The backend sends the element's authoritative spec-derived column
-      // order via this header (useElementColumns' key order isn't reliable
-      // for this — confirmed empirically). Reorder to match, appending
-      // anything unexpected at the end rather than dropping it.
+      // order via this header. Reorder to match, appending anything
+      // unexpected at the end rather than dropping it.
       const columnOrderHeader = response.headers.get("X-Column-Order");
       const columnOrder = columnOrderHeader ? JSON.parse(decodeURIComponent(columnOrderHeader)) : [];
       const orderedHeaders = columnOrder.filter((name) => headers.includes(name));
@@ -55,6 +85,7 @@ function App() {
       const fillColumnsHeader = response.headers.get("X-Fill-Columns");
       const fillColumns = fillColumnsHeader ? JSON.parse(decodeURIComponent(fillColumnsHeader)) : [];
       forwardFillColumns(records, fillColumns);
+
       const result = await exportToExcel({
         headers: finalHeaders,
         records,
@@ -72,29 +103,54 @@ function App() {
     } finally {
       setIsExporting(false);
     }
-  }, [columnNames, splitColumnName]);
+  }, [selectedElementId, splitColumnName]);
 
-  let hint = null;
-  if (!config.source) {
-    hint = "Select a data source (e.g. a Pivot Table) in the editor panel to get started.";
-  } else if (!config.splitColumn) {
-    hint = "Select a column to split worksheets by in the editor panel.";
-  }
-
-  const canExport = Boolean(config.source && config.splitColumn) && !isExporting;
+  const canExport = Boolean(selectedElementId && splitColumnName) && !isExporting;
 
   return (
     <div className="excel-export-plugin">
+      {isLoadingTables && <p className="hint">Loading tables…</p>}
+      {loadError && <p className="status status-error">{loadError}</p>}
+      {!isLoadingTables && !loadError && tables.length === 0 && (
+        <p className="hint">No tables or pivot tables found in this workbook.</p>
+      )}
+      {!isLoadingTables && !loadError && tables.length > 0 && (
+        <>
+          <label className="field">
+            <span>Table</span>
+            <select value={selectedElementId} onChange={handleTableChange}>
+              <option value="" disabled>
+                Select a table…
+              </option>
+              {tables.map((table) => (
+                <option key={table.elementId} value={table.elementId}>
+                  {table.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Split worksheets by</span>
+            <select
+              value={splitColumnName}
+              onChange={(event) => setSplitColumnName(event.target.value)}
+              disabled={!selectedTable}
+            >
+              <option value="" disabled>
+                Select a column…
+              </option>
+              {(selectedTable?.columnOrder || []).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      )}
       <button className="export-button" onClick={handleExport} disabled={!canExport}>
         {isExporting ? "Exporting…" : "Export to Excel"}
       </button>
-      {hint && <p className="hint">{hint}</p>}
-      {!hint && (
-        <p className="hint">
-          Will split worksheets by &ldquo;{splitColumnName}&rdquo;, using the exact values Sigma
-          computes for this element.
-        </p>
-      )}
       {status && <p className={`status status-${status.type}`}>{status.message}</p>}
     </div>
   );
