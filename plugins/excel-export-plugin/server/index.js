@@ -101,12 +101,12 @@ async function listAllElements(workbookId) {
   return elements;
 }
 
-async function getElementColumnLabels(workbookId, elementId) {
+async function getElementColumns(workbookId, elementId) {
   const res = await sigmaFetch(`/v2/workbooks/${workbookId}/elements/${elementId}/columns`);
   if (!res.ok) return [];
   const data = await res.json();
   const entries = data.entries || data;
-  return entries.map((c) => (c.label || c.name || "").toLowerCase()).filter(Boolean);
+  return entries.map((c) => c.label || c.name || "").filter(Boolean);
 }
 
 /**
@@ -117,18 +117,24 @@ async function getElementColumnLabels(workbookId, elementId) {
  * works even when useElementData doesn't) against every real element's
  * columns, and pick the best overlap. Works for any table/pivot table
  * without hardcoding an ID.
+ *
+ * Also returns that element's own column order from the REST API, since
+ * it's the authoritative configured order — useElementColumns' key order
+ * on the client side does NOT reliably match Sigma's visual column order
+ * (confirmed empirically: reordering by it still came out wrong).
  */
 async function resolveElementIdByColumns(workbookId, expectedColumnNames) {
-  const expected = new Set(expectedColumnNames.map((n) => n.toLowerCase()));
+  const expectedLower = new Set(expectedColumnNames.map((n) => n.toLowerCase()));
   const candidates = (await listAllElements(workbookId)).filter((e) => e.type !== "plugin");
 
   const scored = [];
   for (const candidate of candidates) {
-    const labels = await getElementColumnLabels(workbookId, candidate.elementId);
-    if (!labels.length) continue;
-    const overlap = labels.filter((label) => expected.has(label)).length;
-    const score = overlap / Math.max(expected.size, labels.length);
-    scored.push({ ...candidate, score });
+    const columns = await getElementColumns(workbookId, candidate.elementId);
+    if (!columns.length) continue;
+    const lower = columns.map((c) => c.toLowerCase());
+    const overlap = lower.filter((label) => expectedLower.has(label)).length;
+    const score = overlap / Math.max(expectedLower.size, columns.length);
+    scored.push({ ...candidate, score, columns });
   }
   scored.sort((a, b) => b.score - a.score);
 
@@ -143,7 +149,7 @@ async function resolveElementIdByColumns(workbookId, expectedColumnNames) {
         `Closest candidates: ${summary || "none found"}.`
     );
   }
-  return best.elementId;
+  return { elementId: best.elementId, columnOrder: best.columns };
 }
 
 async function pollDownload(queryId) {
@@ -233,8 +239,10 @@ app.post("/api/export-pivot", async (req, res) => {
       return res.status(400).json({ error: `Could not determine workbook urlId from "${wbPath}".` });
     }
     const workbookId = await resolveWorkbookId(urlId);
-    const elementId = await resolveElementIdByColumns(workbookId, columnNames);
+    const { elementId, columnOrder } = await resolveElementIdByColumns(workbookId, columnNames);
     const csv = await exportElementAsCsv(workbookId, elementId);
+    res.set("X-Column-Order", encodeURIComponent(JSON.stringify(columnOrder)));
+    res.set("Access-Control-Expose-Headers", "X-Column-Order");
     res.type("text/csv").send(csv);
   } catch (err) {
     console.error("[excel-export-plugin server]", err);

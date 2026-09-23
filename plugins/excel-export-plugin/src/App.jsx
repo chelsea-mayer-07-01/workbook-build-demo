@@ -37,11 +37,14 @@ function App() {
       }
       const csvText = await response.text();
       const { headers, records } = parseCsv(csvText);
-      // Sigma's export doesn't necessarily return columns in visual left-to-
-      // right order, but columnNames (from useElementColumns) does — reorder
-      // to match, appending anything unexpected at the end rather than
-      // dropping it.
-      const orderedHeaders = columnNames.filter((name) => headers.includes(name));
+      // Sigma's export doesn't return columns in visual left-to-right order.
+      // The backend sends the element's authoritative REST API column order
+      // via this header (useElementColumns' key order isn't reliable for
+      // this — confirmed empirically). Reorder to match, appending anything
+      // unexpected at the end rather than dropping it.
+      const columnOrderHeader = response.headers.get("X-Column-Order");
+      const columnOrder = columnOrderHeader ? JSON.parse(decodeURIComponent(columnOrderHeader)) : [];
+      const orderedHeaders = columnOrder.filter((name) => headers.includes(name));
       const leftoverHeaders = headers.filter((h) => !orderedHeaders.includes(h));
       const finalHeaders = [...orderedHeaders, ...leftoverHeaders];
       const result = await exportToExcel({
